@@ -25,7 +25,7 @@
     </radialGradient>
   </defs>
 
-  <!-- Madder Clay accent: #A6442E ; soft sage leaf: #8C9A6A -->
+  <!-- Madder Clay accent: #A6442E , soft sage leaf: #8C9A6A -->
 
   <!-- Fabric square -->
   <rect x="64" y="64" width="896" height="896" rx="168" fill="url(#linen)"/>
