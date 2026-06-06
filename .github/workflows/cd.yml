@@ -1,183 +1,212 @@
-name: CD
-
-# Required secrets:
-#   GITLAB_PAT          – clone from GitLab + MATCH_GIT_BASIC_AUTHORIZATION
-#   ASC_API_KEY_JSON    – App Store Connect API key JSON (load_asc_api_key reads env directly)
-#   MATCH_PASSWORD      – match git-repo encryption passphrase
-# NOTE: MATCH_KEYCHAIN_PASSWORD is NOT required — setup_ci creates a keychain
-#       with an empty password and configures match automatically.
-
-on:
-  workflow_dispatch:
-    inputs:
-      lane:
-        description: "Fastlane lane to run"
-        type: choice
-        options: [beta, release]
-        default: beta
-      ref_type:
-        description: "Git ref type"
-        type: choice
-        options: [branch, tag]
-        default: branch
-      ref:
-        description: "Branch or tag to build"
-        type: string
-        default: main
-      notes:
-        description: "Release notes / TestFlight changelog (optional)"
-        type: string
-        required: false
-      skip_tests:
-        description: "Skip XCTest gate"
-        type: boolean
-        default: false
-      version_bump:
-        description: "Semver bump type"
-        type: choice
-        options: [none, patch, minor, major]
-        default: patch
-      run_screenshots:
-        description: "Capture and upload App Store screenshots"
-        type: boolean
-        default: false
-
-permissions:
-  contents: read
-  actions: read
-
-env:
-  XCODE_VERSION: "26"
-  DERIVED_DATA_PATH: ${{ github.workspace }}/build/app/xcode-derived-data
-  GITLAB_PROJECT: yashasg/fabric-stabilizer-picker
-
-jobs:
-  testflight:
-    name: ${{ inputs.lane == 'release' && 'App Store Release' || 'TestFlight' }}
-    runs-on: macos-26
-    timeout-minutes: 60
-    concurrency:
-      group: cd-${{ inputs.lane }}-${{ inputs.ref }}
-      cancel-in-progress: false
-    env:
-      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-      ASC_API_KEY_JSON: ${{ secrets.ASC_API_KEY_JSON }}
-      TESTFLIGHT_NOTES: ${{ inputs.notes }}
-
-    steps:
-      - name: Validate dispatch inputs
-        run: |
-          if [[ "${{ inputs.ref_type }}" == "tag" && "${{ inputs.version_bump }}" != "none" ]]; then
-            echo "::error::version_bump must be 'none' when building from a tag (the tag already encodes the version)."
-            exit 1
-          fi
-
-      - name: Checkout from GitLab
-        run: |
-          git clone --depth 1 --branch "${{ inputs.ref }}" \
-            "https://oauth2:${{ secrets.GITLAB_PAT }}@gitlab.com/${{ env.GITLAB_PROJECT }}.git" .
-
-      - name: Restore DerivedData cache
-        id: cache-restore
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae
-        with:
-          path: ${{ env.DERIVED_DATA_PATH }}
-          key: deriveddata-${{ hashFiles('**/*.pbxproj', '**/*.xcscheme') }}
-          restore-keys: deriveddata-
-
-      - name: Setup Ruby for fastlane
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "3.4"
-          bundler-cache: true
-          working-directory: app
-
-      - name: Prepare Match authentication
-        run: |
-          echo "MATCH_GIT_BASIC_AUTHORIZATION=$(echo -n "oauth2:${{ secrets.GITLAB_PAT }}" | base64)" \
-            >> "$GITHUB_ENV"
-
-      - name: Run XCTest gate
-        if: ${{ !inputs.skip_tests }}
-        working-directory: app
-        run: bundle exec fastlane test
-
-      - name: Build and distribute via Fastlane
-        working-directory: app
-        env:
-          DERIVED_DATA_PATH: ${{ env.DERIVED_DATA_PATH }}
-        run: |
-          ARGS=""
-          if [[ "${{ inputs.version_bump }}" != "none" ]]; then
-            ARGS="bump:${{ inputs.version_bump }}"
-          fi
-          if [[ -n "${{ inputs.notes }}" ]]; then
-            ARGS="${ARGS:+$ARGS }notes:${{ inputs.notes }}"
-          fi
-          bundle exec fastlane ${{ inputs.lane }} $ARGS
-
-      - name: Save DerivedData cache
-        if: always()
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae
-        with:
-          path: ${{ env.DERIVED_DATA_PATH }}
-          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
-
-      - name: Upload build artifacts
-        if: success()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: build-artifacts-${{ inputs.lane }}-${{ github.run_number }}
-          path: |
-            app/*.ipa
-            app/*.pkg
-            app/*.dSYM.zip
-            app/*.xcarchive
-          if-no-files-found: warn
-
-      - name: Upload diagnostics on failure
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: diagnostics-${{ github.run_number }}
-          path: |
-            app/.build/gym/*.log
-            app/.build/*.xcresult
-          if-no-files-found: ignore
-
-  screenshots:
-    name: App Store Screenshots
-    if: ${{ inputs.run_screenshots }}
-    runs-on: macos-26
-    timeout-minutes: 60
-    env:
-      ASC_API_KEY_JSON: ${{ secrets.ASC_API_KEY_JSON }}
-
-    steps:
-      - name: Checkout from GitLab
-        run: |
-          git clone --depth 1 --branch "${{ inputs.ref }}" \
-            "https://oauth2:${{ secrets.GITLAB_PAT }}@gitlab.com/${{ env.GITLAB_PROJECT }}.git" .
-
-      - name: Setup Ruby for fastlane
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "3.4"
-          bundler-cache: true
-          working-directory: app
-
-      - name: Capture screenshots
-        working-directory: app
-        run: bundle exec fastlane screenshots
-
-      - name: Upload screenshots to App Store Connect
-        working-directory: app
-        run: bundle exec fastlane upload_screenshots
-
-      - name: Upload screenshots artifact
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: screenshots-${{ github.run_number }}
-          path: app/fastlane/screenshots/
-          if-no-files-found: warn
+ name: CD
+ 
+ # Required secrets:
+ #   GITLAB_PAT          – clone from GitLab + MATCH_GIT_BASIC_AUTHORIZATION
+ #   ASC_API_KEY_JSON    – App Store Connect API key JSON (load_asc_api_key reads env directly)
+ #   MATCH_PASSWORD      – match git-repo encryption passphrase
+ # NOTE: MATCH_KEYCHAIN_PASSWORD is NOT required — setup_ci creates a keychain
+ #       with an empty password and configures match automatically.
+ 
+ on:
+   workflow_dispatch:
+     inputs:
+       lane:
+         description: "Fastlane lane to run"
+         type: choice
+         options: [beta, release]
+         default: beta
+       ref_type:
+         description: "Git ref type"
+         type: choice
+         options: [branch, tag]
+         default: branch
+       ref:
+         description: "Branch or tag to build"
+         type: string
+         default: main
+       notes:
+         description: "Release notes / TestFlight changelog (optional)"
+         type: string
+         required: false
+       skip_tests:
+         description: "Skip XCTest gate"
+         type: boolean
+         default: false
+       version_bump:
+         description: "Semver bump type"
+         type: choice
+         options: [none, patch, minor, major]
+         default: patch
+       run_screenshots:
+         description: "Capture and upload App Store screenshots"
+         type: boolean
+         default: false
+       run_metadata:
+         description: "Upload App Store text metadata (name, description, keywords, etc.)"
+         type: boolean
+         default: false
+ 
+ permissions:
+   contents: read
+   actions: read
+ 
+ env:
+   XCODE_VERSION: "26"
+   DERIVED_DATA_PATH: ${{ github.workspace }}/build/app/xcode-derived-data
+   GITLAB_PROJECT: yashasg/fabric-stabilizer-picker
+ 
+ jobs:
+   testflight:
+     name: ${{ inputs.lane == 'release' && 'App Store Release' || 'TestFlight' }}
+     runs-on: macos-26
+     timeout-minutes: 60
+     concurrency:
+       group: cd-${{ inputs.lane }}-${{ inputs.ref }}
+       cancel-in-progress: false
+     env:
+       MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+       ASC_API_KEY_JSON: ${{ secrets.ASC_API_KEY_JSON }}
+       TESTFLIGHT_NOTES: ${{ inputs.notes }}
+ 
+     steps:
+       - name: Validate dispatch inputs
+         run: |
+           if [[ "${{ inputs.ref_type }}" == "tag" && "${{ inputs.version_bump }}" != "none" ]]; then
+             echo "::error::version_bump must be 'none' when building from a tag (the tag already encodes the version)."
+             exit 1
+           fi
+ 
+       - name: Checkout from GitLab
+         run: |
+           git clone --depth 1 --branch "${{ inputs.ref }}" \
+             "https://oauth2:${{ secrets.GITLAB_PAT }}@gitlab.com/${{ env.GITLAB_PROJECT }}.git" .
+ 
+       - name: Restore DerivedData cache
+         id: cache-restore
+         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae
+         with:
+           path: ${{ env.DERIVED_DATA_PATH }}
+           key: deriveddata-${{ hashFiles('**/*.pbxproj', '**/*.xcscheme') }}
+           restore-keys: deriveddata-
+ 
+       - name: Setup Ruby for fastlane
+         uses: ruby/setup-ruby@v1
+         with:
+           ruby-version: "3.4"
+           bundler-cache: true
+           working-directory: app
+ 
+       - name: Prepare Match authentication
+         run: |
+           echo "MATCH_GIT_BASIC_AUTHORIZATION=$(echo -n "oauth2:${{ secrets.GITLAB_PAT }}" | base64)" \
+             >> "$GITHUB_ENV"
+ 
+       - name: Run XCTest gate
+         if: ${{ !inputs.skip_tests }}
+         working-directory: app
+         run: bundle exec fastlane test
+ 
+       - name: Build and distribute via Fastlane
+         working-directory: app
+         env:
+           DERIVED_DATA_PATH: ${{ env.DERIVED_DATA_PATH }}
+         run: |
+           ARGS=""
+           if [[ "${{ inputs.version_bump }}" != "none" ]]; then
+             ARGS="bump:${{ inputs.version_bump }}"
+           fi
+           if [[ -n "${{ inputs.notes }}" ]]; then
+             ARGS="${ARGS:+$ARGS }notes:${{ inputs.notes }}"
+           fi
+           bundle exec fastlane ${{ inputs.lane }} $ARGS
+ 
+       - name: Save DerivedData cache
+         if: always()
+         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae
+         with:
+           path: ${{ env.DERIVED_DATA_PATH }}
+           key: ${{ steps.cache-restore.outputs.cache-primary-key }}
+ 
+       - name: Upload build artifacts
+         if: success()
+         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+         with:
+           name: build-artifacts-${{ inputs.lane }}-${{ github.run_number }}
+           path: |
+             app/*.ipa
+             app/*.pkg
+             app/*.dSYM.zip
+             app/*.xcarchive
+           if-no-files-found: warn
+ 
+       - name: Upload diagnostics on failure
+         if: failure()
+         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+         with:
+           name: diagnostics-${{ github.run_number }}
+           path: |
+             app/.build/gym/*.log
+             app/.build/*.xcresult
+           if-no-files-found: ignore
+ 
+   screenshots:
+     name: App Store Screenshots
+     if: ${{ inputs.run_screenshots }}
+     runs-on: macos-26
+     timeout-minutes: 60
+     env:
+       ASC_API_KEY_JSON: ${{ secrets.ASC_API_KEY_JSON }}
+ 
+     steps:
+       - name: Checkout from GitLab
+         run: |
+           git clone --depth 1 --branch "${{ inputs.ref }}" \
+             "https://oauth2:${{ secrets.GITLAB_PAT }}@gitlab.com/${{ env.GITLAB_PROJECT }}.git" .
+ 
+       - name: Setup Ruby for fastlane
+         uses: ruby/setup-ruby@v1
+         with:
+           ruby-version: "3.4"
+           bundler-cache: true
+           working-directory: app
+ 
+       - name: Capture screenshots
+         working-directory: app
+         run: bundle exec fastlane screenshots
+ 
+       - name: Upload screenshots to App Store Connect
+         working-directory: app
+         run: bundle exec fastlane upload_screenshots
+ 
+       - name: Upload screenshots artifact
+         if: always()
+         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+         with:
+           name: screenshots-${{ github.run_number }}
+           path: app/fastlane/screenshots/
+           if-no-files-found: warn
+ 
+   metadata:
+     name: App Store Metadata
+     if: ${{ inputs.run_metadata }}
+     runs-on: macos-26
+     timeout-minutes: 20
+     env:
+       ASC_API_KEY_JSON: ${{ secrets.ASC_API_KEY_JSON }}
+ 
+     steps:
+       - name: Checkout from GitLab
+         run: |
+           git clone --depth 1 --branch "${{ inputs.ref }}" \
+             "https://oauth2:${{ secrets.GITLAB_PAT }}@gitlab.com/${{ env.GITLAB_PROJECT }}.git" .
+ 
+       - name: Setup Ruby for fastlane
+         uses: ruby/setup-ruby@v1
+         with:
+           ruby-version: "3.4"
+           bundler-cache: true
+           working-directory: app
+ 
+       - name: Upload metadata to App Store Connect
+         working-directory: app
+         run: bundle exec fastlane upload_metadata
